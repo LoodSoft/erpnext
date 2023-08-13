@@ -26,6 +26,7 @@ from erpnext.accounts.general_ledger import make_reverse_gl_entries
 from erpnext.assets.doctype.asset.depreciation import (
 	get_depreciation_accounts,
 	get_disposal_account_and_cost_center,
+	is_first_day_of_the_month,
 	is_last_day_of_the_month,
 )
 from erpnext.assets.doctype.asset_category.asset_category import get_asset_category_account
@@ -147,17 +148,33 @@ class Asset(AccountsController):
 			frappe.throw(_("Item {0} must be a non-stock item").format(self.item_code))
 
 	def validate_cost_center(self):
-		if not self.cost_center:
-			return
-
-		cost_center_company = frappe.db.get_value("Cost Center", self.cost_center, "company")
-		if cost_center_company != self.company:
-			frappe.throw(
-				_("Selected Cost Center {} doesn't belongs to {}").format(
-					frappe.bold(self.cost_center), frappe.bold(self.company)
-				),
-				title=_("Invalid Cost Center"),
+		if self.cost_center:
+			cost_center_company, cost_center_is_group = frappe.db.get_value(
+				"Cost Center", self.cost_center, ["company", "is_group"]
 			)
+			if cost_center_company != self.company:
+				frappe.throw(
+					_("Cost Center {} doesn't belong to Company {}").format(
+						frappe.bold(self.cost_center), frappe.bold(self.company)
+					),
+					title=_("Invalid Cost Center"),
+				)
+			if cost_center_is_group:
+				frappe.throw(
+					_(
+						"Cost Center {} is a group cost center and group cost centers cannot be used in transactions"
+					).format(frappe.bold(self.cost_center)),
+					title=_("Invalid Cost Center"),
+				)
+
+		else:
+			if not frappe.get_cached_value("Company", self.company, "depreciation_cost_center"):
+				frappe.throw(
+					_(
+						"Please set a Cost Center for the Asset or set an Asset Depreciation Cost Center for the Company {}"
+					).format(frappe.bold(self.company)),
+					title=_("Missing Cost Center"),
+				)
 
 	def validate_in_use_date(self):
 		if not self.available_for_use_date:
@@ -206,8 +223,11 @@ class Asset(AccountsController):
 
 		if not self.calculate_depreciation:
 			return
-		elif not self.finance_books:
-			frappe.throw(_("Enter depreciation details"))
+		else:
+			if not self.finance_books:
+				frappe.throw(_("Enter depreciation details"))
+			if self.is_fully_depreciated:
+				frappe.throw(_("Depreciation cannot be calculated for fully depreciated assets"))
 
 		if self.is_existing_asset:
 			return
@@ -337,10 +357,6 @@ class Asset(AccountsController):
 				if should_get_last_day:
 					schedule_date = get_last_day(schedule_date)
 
-				# schedule date will be a year later from start date
-				# so monthly schedule date is calculated by removing 11 months from it
-				monthly_schedule_date = add_months(schedule_date, -finance_book.frequency_of_depreciation + 1)
-
 			# if asset is being sold
 			if date_of_disposal:
 				from_date = self.get_from_date_for_disposal(finance_book)
@@ -364,9 +380,9 @@ class Asset(AccountsController):
 
 			# For first row
 			if (
-				(has_pro_rata or has_wdv_or_dd_non_yearly_pro_rata)
+				n == 0
+				and (has_pro_rata or has_wdv_or_dd_non_yearly_pro_rata)
 				and not self.opening_accumulated_depreciation
-				and n == 0
 			):
 				from_date = add_days(
 					self.available_for_use_date, -1
@@ -378,10 +394,26 @@ class Asset(AccountsController):
 					finance_book.depreciation_start_date,
 					has_wdv_or_dd_non_yearly_pro_rata,
 				)
-
-				# For first depr schedule date will be the start date
-				# so monthly schedule date is calculated by removing month difference between use date and start date
-				monthly_schedule_date = add_months(finance_book.depreciation_start_date, -months + 1)
+			elif n == 0 and has_wdv_or_dd_non_yearly_pro_rata and self.opening_accumulated_depreciation:
+				if not is_first_day_of_the_month(getdate(self.available_for_use_date)):
+					from_date = get_last_day(
+						add_months(
+							getdate(self.available_for_use_date),
+							((self.number_of_depreciations_booked - 1) * finance_book.frequency_of_depreciation),
+						)
+					)
+				else:
+					from_date = add_months(
+						getdate(add_days(self.available_for_use_date, -1)),
+						(self.number_of_depreciations_booked * finance_book.frequency_of_depreciation),
+					)
+				depreciation_amount, days, months = self.get_pro_rata_amt(
+					finance_book,
+					depreciation_amount,
+					from_date,
+					finance_book.depreciation_start_date,
+					has_wdv_or_dd_non_yearly_pro_rata,
+				)
 
 			# For last row
 			elif has_pro_rata and n == cint(number_of_pending_depreciations) - 1:
@@ -406,9 +438,7 @@ class Asset(AccountsController):
 					depreciation_amount_without_pro_rata, depreciation_amount, finance_book.finance_book
 				)
 
-				monthly_schedule_date = add_months(schedule_date, 1)
 				schedule_date = add_days(schedule_date, days)
-				last_schedule_date = schedule_date
 
 			if not depreciation_amount:
 				continue
@@ -577,7 +607,7 @@ class Asset(AccountsController):
 			depreciable_amount = flt(self.gross_purchase_amount) - flt(row.expected_value_after_useful_life)
 			if flt(self.opening_accumulated_depreciation) > depreciable_amount:
 				frappe.throw(
-					_("Opening Accumulated Depreciation must be less than equal to {0}").format(
+					_("Opening Accumulated Depreciation must be less than or equal to {0}").format(
 						depreciable_amount
 					)
 				)
@@ -782,7 +812,9 @@ class Asset(AccountsController):
 					expected_value_after_useful_life = self.finance_books[idx].expected_value_after_useful_life
 					value_after_depreciation = self.finance_books[idx].value_after_depreciation
 
-				if flt(value_after_depreciation) <= expected_value_after_useful_life:
+				if (
+					flt(value_after_depreciation) <= expected_value_after_useful_life or self.is_fully_depreciated
+				):
 					status = "Fully Depreciated"
 				elif flt(value_after_depreciation) < flt(self.gross_purchase_amount):
 					status = "Partially Depreciated"
@@ -930,7 +962,9 @@ class Asset(AccountsController):
 
 	@frappe.whitelist()
 	def get_manual_depreciation_entries(self):
-		(_, _, depreciation_expense_account) = get_depreciation_accounts(self)
+		(_, _, depreciation_expense_account) = get_depreciation_accounts(
+			self.asset_category, self.company
+		)
 
 		gle = frappe.qb.DocType("GL Entry")
 
@@ -1169,10 +1203,10 @@ def get_asset_account(account_name, asset=None, asset_category=None, company=Non
 def make_journal_entry(asset_name):
 	asset = frappe.get_doc("Asset", asset_name)
 	(
-		fixed_asset_account,
+		_,
 		accumulated_depreciation_account,
 		depreciation_expense_account,
-	) = get_depreciation_accounts(asset)
+	) = get_depreciation_accounts(asset.asset_category, asset.company)
 
 	depreciation_cost_center, depreciation_series = frappe.get_cached_value(
 		"Company", asset.company, ["depreciation_cost_center", "series_for_depreciation_entry"]
@@ -1402,6 +1436,8 @@ def create_new_asset_after_split(asset, split_qty):
 	)
 
 	new_asset.gross_purchase_amount = new_gross_purchase_amount
+	if asset.purchase_receipt_amount:
+		new_asset.purchase_receipt_amount = new_gross_purchase_amount
 	new_asset.opening_accumulated_depreciation = opening_accumulated_depreciation
 	new_asset.asset_quantity = split_qty
 	new_asset.split_from = asset.name

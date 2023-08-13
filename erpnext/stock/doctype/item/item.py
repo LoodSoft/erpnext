@@ -395,16 +395,16 @@ class Item(Document):
 
 	def validate_warehouse_for_reorder(self):
 		"""Validate Reorder level table for duplicate and conditional mandatory"""
-		warehouse = []
+		warehouse_material_request_type: list[tuple[str, str]] = []
 		for d in self.get("reorder_levels"):
 			if not d.warehouse_group:
 				d.warehouse_group = d.warehouse
-			if d.get("warehouse") and d.get("warehouse") not in warehouse:
-				warehouse += [d.get("warehouse")]
+			if (d.get("warehouse"), d.get("material_request_type")) not in warehouse_material_request_type:
+				warehouse_material_request_type += [(d.get("warehouse"), d.get("material_request_type"))]
 			else:
 				frappe.throw(
-					_("Row {0}: An Reorder entry already exists for this warehouse {1}").format(
-						d.idx, d.warehouse
+					_("Row #{0}: A reorder entry already exists for warehouse {1} with reorder type {2}.").format(
+						d.idx, d.warehouse, d.material_request_type
 					),
 					DuplicateReorderRows,
 				)
@@ -714,6 +714,7 @@ class Item(Document):
 						template=self,
 						now=frappe.flags.in_test,
 						timeout=600,
+						enqueue_after_commit=True,
 					)
 
 	def validate_has_variants(self):

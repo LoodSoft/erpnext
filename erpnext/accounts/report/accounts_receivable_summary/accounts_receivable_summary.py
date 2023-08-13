@@ -12,7 +12,7 @@ from erpnext.accounts.report.accounts_receivable.accounts_receivable import Rece
 
 def execute(filters=None):
 	args = {
-		"party_type": "Customer",
+		"account_type": "Receivable",
 		"naming_by": ["Selling Settings", "cust_master_name"],
 	}
 
@@ -21,7 +21,10 @@ def execute(filters=None):
 
 class AccountsReceivableSummary(ReceivablePayableReport):
 	def run(self, args):
-		self.party_type = args.get("party_type")
+		self.account_type = args.get("account_type")
+		self.party_type = frappe.db.get_all(
+			"Party Type", {"account_type": self.account_type}, pluck="name"
+		)
 		self.party_naming_by = frappe.db.get_value(
 			args.get("naming_by")[0], None, args.get("naming_by")[1]
 		)
@@ -31,10 +34,14 @@ class AccountsReceivableSummary(ReceivablePayableReport):
 
 	def get_data(self, args):
 		self.data = []
-
 		self.receivables = ReceivablePayableReport(self.filters).run(args)[1]
 
 		self.get_party_total(args)
+
+		party = None
+		for party_type in self.party_type:
+			if self.filters.get(scrub(party_type)):
+				party = self.filters.get(scrub(party_type))
 
 		party_advance_amount = (
 			get_partywise_advanced_payment_amount(
@@ -42,6 +49,8 @@ class AccountsReceivableSummary(ReceivablePayableReport):
 				self.filters.report_date,
 				self.filters.show_future_payments,
 				self.filters.company,
+				party=party,
+				account_type=self.account_type,
 			)
 			or {}
 		)
@@ -57,9 +66,13 @@ class AccountsReceivableSummary(ReceivablePayableReport):
 
 			row.party = party
 			if self.party_naming_by == "Naming Series":
-				row.party_name = frappe.get_cached_value(
-					self.party_type, party, scrub(self.party_type) + "_name"
-				)
+				if self.account_type == "Payable":
+					doctype = "Supplier"
+					fieldname = "supplier_name"
+				else:
+					doctype = "Customer"
+					fieldname = "customer_name"
+				row.party_name = frappe.get_cached_value(doctype, party, fieldname)
 
 			row.update(party_dict)
 
@@ -73,6 +86,9 @@ class AccountsReceivableSummary(ReceivablePayableReport):
 			if self.filters.show_gl_balance:
 				row.gl_balance = gl_balance_map.get(party)
 				row.diff = flt(row.outstanding) - flt(row.gl_balance)
+
+			if self.filters.show_future_payments:
+				row.remaining_balance = flt(row.outstanding) - flt(row.future_amount)
 
 			self.data.append(row)
 
@@ -90,6 +106,7 @@ class AccountsReceivableSummary(ReceivablePayableReport):
 
 			# set territory, customer_group, sales person etc
 			self.set_party_details(d)
+			self.party_total[d.party].update({"party_type": d.party_type})
 
 	def init_party_total(self, row):
 		self.party_total.setdefault(
@@ -106,6 +123,7 @@ class AccountsReceivableSummary(ReceivablePayableReport):
 					"range4": 0.0,
 					"range5": 0.0,
 					"total_due": 0.0,
+					"future_amount": 0.0,
 					"sales_person": [],
 				}
 			),
@@ -127,17 +145,27 @@ class AccountsReceivableSummary(ReceivablePayableReport):
 	def get_columns(self):
 		self.columns = []
 		self.add_column(
-			label=_(self.party_type),
+			label=_("Party Type"),
+			fieldname="party_type",
+			fieldtype="Data",
+			width=100,
+		)
+		self.add_column(
+			label=_("Party"),
 			fieldname="party",
-			fieldtype="Link",
-			options=self.party_type,
+			fieldtype="Dynamic Link",
+			options="party_type",
 			width=180,
 		)
 
 		if self.party_naming_by == "Naming Series":
-			self.add_column(_("{0} Name").format(self.party_type), fieldname="party_name", fieldtype="Data")
+			self.add_column(
+				label=_("Supplier Name") if self.account_type == "Payable" else _("Customer Name"),
+				fieldname="party_name",
+				fieldtype="Data",
+			)
 
-		credit_debit_label = "Credit Note" if self.party_type == "Customer" else "Debit Note"
+		credit_debit_label = "Credit Note" if self.account_type == "Receivable" else "Debit Note"
 
 		self.add_column(_("Advance Amount"), fieldname="advance")
 		self.add_column(_("Invoiced Amount"), fieldname="invoiced")
@@ -151,7 +179,11 @@ class AccountsReceivableSummary(ReceivablePayableReport):
 
 		self.setup_ageing_columns()
 
-		if self.party_type == "Customer":
+		if self.filters.show_future_payments:
+			self.add_column(label=_("Future Payment Amount"), fieldname="future_amount")
+			self.add_column(label=_("Remaining Balance"), fieldname="remaining_balance")
+
+		if self.account_type == "Receivable":
 			self.add_column(
 				label=_("Territory"), fieldname="territory", fieldtype="Link", options="Territory"
 			)
