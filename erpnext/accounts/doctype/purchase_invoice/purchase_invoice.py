@@ -543,6 +543,7 @@ class PurchaseInvoice(BuyingController):
 					merge_entries=False,
 					from_repost=from_repost,
 				)
+				self.make_exchange_gain_loss_journal()
 			elif self.docstatus == 2:
 				provisional_entries = [a for a in gl_entries if a.voucher_type == "Purchase Receipt"]
 				make_reverse_gl_entries(voucher_type=self.doctype, voucher_no=self.name)
@@ -587,7 +588,6 @@ class PurchaseInvoice(BuyingController):
 			self.get_asset_gl_entry(gl_entries)
 
 		self.make_tax_gl_entries(gl_entries)
-		self.make_exchange_gain_loss_gl_entries(gl_entries)
 		self.make_internal_transfer_gl_entries(gl_entries)
 
 		gl_entries = make_regional_gl_entries(gl_entries, self)
@@ -768,21 +768,22 @@ class PurchaseInvoice(BuyingController):
 
 					# Amount added through landed-cost-voucher
 					if landed_cost_entries:
-						for account, amount in landed_cost_entries[(item.item_code, item.name)].items():
-							gl_entries.append(
-								self.get_gl_dict(
-									{
-										"account": account,
-										"against": item.expense_account,
-										"cost_center": item.cost_center,
-										"remarks": self.get("remarks") or _("Accounting Entry for Stock"),
-										"credit": flt(amount["base_amount"]),
-										"credit_in_account_currency": flt(amount["amount"]),
-										"project": item.project or self.project,
-									},
-									item=item,
+						if (item.item_code, item.name) in landed_cost_entries:
+							for account, amount in landed_cost_entries[(item.item_code, item.name)].items():
+								gl_entries.append(
+									self.get_gl_dict(
+										{
+											"account": account,
+											"against": item.expense_account,
+											"cost_center": item.cost_center,
+											"remarks": self.get("remarks") or _("Accounting Entry for Stock"),
+											"credit": flt(amount["base_amount"]),
+											"credit_in_account_currency": flt(amount["amount"]),
+											"project": item.project or self.project,
+										},
+										item=item,
+									)
 								)
-							)
 
 					# sub-contracting warehouse
 					if flt(item.rm_supp_cost):
@@ -1422,6 +1423,8 @@ class PurchaseInvoice(BuyingController):
 			"Repost Item Valuation",
 			"Repost Payment Ledger",
 			"Repost Payment Ledger Items",
+			"Repost Accounting Ledger",
+			"Repost Accounting Ledger Items",
 			"Payment Ledger Entry",
 			"Tax Withheld Vouchers",
 		)
