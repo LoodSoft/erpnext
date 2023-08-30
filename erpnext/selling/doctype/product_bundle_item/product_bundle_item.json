@@ -24,10 +24,10 @@
    "reqd": 1
   },
   {
-   "fieldname": "qty",
+   "fieldname": "stock_qty",
    "fieldtype": "Float",
    "in_list_view": 1,
-   "label": "Qty",
+   "label": "Stock Qty",
    "oldfieldname": "qty",
    "oldfieldtype": "Currency",
    "reqd": 1
